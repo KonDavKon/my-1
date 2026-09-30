@@ -1,8 +1,12 @@
-"""Confidence booster: a live "monitor" of your webcam that plays hype edits when you strike a pose.
+"""Confidence booster: a live "monitor" of your webcam that cuts hype edits out of your own footage by itself.
+
+The camera is recorded into a rolling buffer; every few seconds (config "auto_every") an edit is made from
+what you just did, and gestures / expressions can start their own edits too.
 
     python boost.py                     # default webcam, config.json
     python boost.py --source 1          # another camera
-    python boost.py --auto 5            # start an edit every 5 s (demo, no gestures needed)
+    python boost.py --auto 5            # a self-made edit every 5 s
+    python boost.py --no-auto           # only gestures and keys start edits
     python boost.py --source clip.mp4 --headless --record out.mp4 --auto 3 --mute   # render without a window
 
 Keys:  q / Esc quit,  1-9 start edit N,  space start a random edit,  f fullscreen.
@@ -23,6 +27,7 @@ import numpy as np
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 
+import autoedit
 import config as cfgmod
 import effects
 import hud
@@ -93,7 +98,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--headless", action="store_true", help="no window (use with --record / --max-seconds)")
     ap.add_argument("--record", help="write the composited picture to this mp4 file")
     ap.add_argument("--max-seconds", type=float, help="stop after this many seconds of (video) time")
-    ap.add_argument("--auto", type=float, metavar="SEC", help="start the next edit every SEC seconds while idle")
+    ap.add_argument("--auto", type=float, metavar="SEC", help="a self-made edit every SEC seconds (default: config auto_every)")
+    ap.add_argument("--no-auto", action="store_true", help="no self-made edits; only gestures and keys")
     ap.add_argument("--mute", action="store_true", help="no sound")
     ap.add_argument("--debug", action="store_true", help="show fired triggers on screen")
     ap.add_argument("--hand-conf", type=float, default=0.5)
@@ -121,7 +127,13 @@ def main() -> None:
         import make_demo_assets
         make_demo_assets.main()
     cfg = cfgmod.load(args.config)
-    engine = triggers.TriggerEngine(cfg.all_triggers())
+    unknown = sorted(cfg.all_triggers() - set(triggers.NAMES) - {"auto"})
+    if unknown:
+        sys.exit(f"config.json: unknown trigger(s) {unknown}; valid: auto, {', '.join(triggers.NAMES)}")
+    engine = triggers.TriggerEngine(triggers.NAMES)      # every event is logged: auto edits caption the moment
+    recorder = autoedit.Recorder()
+    auto_edits = [] if args.no_auto else cfg.auto_edits()
+    auto_range = (args.auto, args.auto) if args.auto else cfg.auto_every
     audio = Audio(enabled=not args.mute)
     if audio.ok:
         for e in cfg.edits:                          # cut the sound out of every clip now, not while playing
@@ -147,10 +159,10 @@ def main() -> None:
 
     box = None
     face_centre = None                                  # last known face centre, in detection pixels
-    fx_id, fx_first, fx_last = -1, None, None           # live effect: playback id, first frame, last picture
+    fx_id, fx_first, fx_last, fx_auto = -1, None, None, None   # effect: playback id, first frame, last picture, self-made edit
     frame_idx, last_ts, failed = 0, -1, 0
     t0 = time.monotonic()
-    next_auto, auto_i = (args.auto or 0.0), 0
+    next_auto = max(6.0, random.uniform(*auto_range))   # give the buffer some footage first
     fired_log: list[tuple[float, str]] = []
     fullscreen = False
     if not args.headless:
@@ -188,21 +200,27 @@ def main() -> None:
                 if fres.facial_transformation_matrixes:
                     ctx.pose = triggers.head_pose(fres.facial_transformation_matrixes[0])
 
+            if ctx.face is not None:
+                face_centre = tuple(ctx.face.mean(axis=0))
+            recorder.add(now, det, face_centre if ctx.face is not None else None)
             for name in engine.update(now, ctx):
                 fired_log.append((now, name))
+                recorder.mark(now, name)
                 choices = cfg.edits_for(name)
-                if choices:
-                    player.start(random.choice(choices), now)
-            if args.auto and not player.busy and now >= next_auto:
-                if player.start(cfg.edits[auto_i % len(cfg.edits)], now):
-                    auto_i += 1
-                    next_auto = now + args.auto
+                if choices and player.start(random.choice(choices), now, {"moment": now, "event": name}):
+                    recorder.take_event()
+                    next_auto = max(next_auto, now + auto_range[0])
+            if auto_edits and not player.busy and now >= next_auto and recorder.span() >= 4.0:
+                ev = recorder.take_event()
+                if ev is None or ev[0] < now - 8.0:           # nothing happened lately: pick a random moment
+                    ev = (now - random.uniform(1.5, min(8.0, recorder.span() - 1.0)), None)
+                if player.start(random.choice(auto_edits), now, {"moment": ev[0], "event": ev[1]}):
+                    next_auto = now + random.uniform(*auto_range)
             view = player.update(now)
 
             img = cv2.resize(det, OUT_SIZE)
             sx = OUT_SIZE[0] / DET_SIZE[0]
             if ctx.face is not None:
-                face_centre = tuple(ctx.face.mean(axis=0))
                 tgt = np.array([*ctx.face.min(axis=0), *ctx.face.max(axis=0)]) * sx
                 pad = (tgt[2] - tgt[0]) * 0.12
                 tgt += np.array([-pad, -pad * 1.5, pad, pad * 0.6])
@@ -218,11 +236,18 @@ def main() -> None:
                 hud.panel_pre(img, rect, view.progress, now)
             elif view.edit.effect:
                 if view.state == PLAY:
-                    if view.play_id != fx_id:              # freeze frames start from this picture
-                        fx_id, fx_first = view.play_id, det.copy()
                     e = view.edit
-                    fx_last = effects.render(e.effect, det, fx_first, view.t, e.trigger_time - e.start,
-                                             (e.end or e.start) - e.start, face_centre, e.caption)
+                    trig, dur = e.trigger_time - e.start, (e.end or e.start) - e.start
+                    if view.play_id != fx_id:              # a new playback: freeze frame / footage snapshot
+                        fx_id, fx_first, fx_auto = view.play_id, det.copy(), None
+                        if e.effect in autoedit.TEMPLATES:
+                            meta = view.meta or {"moment": now, "event": None}
+                            caption = e.caption or cfg.caption_for(meta.get("event"))
+                            fx_auto = autoedit.build(e.effect, recorder, meta["moment"], trig, dur, caption)
+                    if fx_auto is not None:
+                        fx_last = fx_auto.render(view.t)
+                    else:
+                        fx_last = effects.render(e.effect, det, fx_first, view.t, trig, dur, face_centre, e.caption)
                 hud.panel_clip(img, rect, fx_last)
             else:
                 hud.panel_clip(img, rect, view.frame)

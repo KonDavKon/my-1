@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from autoedit import TEMPLATES
 from effects import EFFECTS
+
+ALL_EFFECTS = (*TEMPLATES, *EFFECTS)
 
 SIZES = ("panel", "large")
 
@@ -46,6 +49,16 @@ class Config:
     pre_edit_duration: float
     cooldown: float
     base_dir: Path
+    auto_every: tuple[float, float] = (10.0, 20.0)   # self-made edits start every min..max seconds
+    captions: dict[str, list[str]] = field(default_factory=dict)   # event name / "generic" -> caption choices
+
+    def auto_edits(self) -> list[Edit]:
+        return [e for e in self.edits if "auto" in e.triggers]
+
+    def caption_for(self, event: str | None, rng=None) -> str:
+        import random
+        choices = self.captions.get(event or "", []) or self.captions.get("generic", [])
+        return (rng or random).choice(choices) if choices else ""
 
     def edits_for(self, trigger: str) -> list[Edit]:
         return [e for e in self.edits if trigger in e.triggers]
@@ -67,9 +80,9 @@ def load(path: str | Path) -> Config:
     for i, e in enumerate(raw.get("edits", []), 1):
         where = f"edit #{i} ({e.get('name', e.get('file', e.get('effect', '?')))})"
         if ("file" in e) == ("effect" in e):
-            raise ValueError(f"{where}: give either \"file\" (a video) or \"effect\" (one of {', '.join(EFFECTS)})")
-        if "effect" in e and e["effect"] not in EFFECTS:
-            raise ValueError(f"{where}: unknown effect {e['effect']!r}; valid: {', '.join(EFFECTS)}")
+            raise ValueError(f"{where}: give either \"file\" (a video) or \"effect\" (one of {', '.join(ALL_EFFECTS)})")
+        if "effect" in e and e["effect"] not in ALL_EFFECTS:
+            raise ValueError(f"{where}: unknown effect {e['effect']!r}; valid: {', '.join(ALL_EFFECTS)}")
         start = parse_time(e.get("start", 0))
         end = parse_time(e["end"]) if e.get("end") is not None else (start + 3.0 if "effect" in e else None)
         trigger_time = parse_time(e.get("trigger_time", start + 1.2 if "effect" in e else start))
@@ -98,4 +111,13 @@ def load(path: str | Path) -> Config:
         pre_edit_duration=float(raw.get("pre_edit_duration", 1.0)),
         cooldown=default_cooldown,
         base_dir=base,
+        auto_every=_auto_every(raw.get("auto_every", [10, 20])),
+        captions={k: [v] if isinstance(v, str) else list(v) for k, v in raw.get("captions", {}).items()},
     )
+
+
+def _auto_every(value) -> tuple[float, float]:
+    lo, hi = (value, value) if isinstance(value, (int, float)) else (value[0], value[-1])
+    if not 0 < float(lo) <= float(hi):
+        raise ValueError("\"auto_every\" must be seconds or [min, max] with 0 < min <= max")
+    return float(lo), float(hi)

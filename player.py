@@ -28,6 +28,7 @@ class View:
     impacted: bool = False            # trigger_time has been reached (the caption shows from then on)
     t: float = 0.0                    # seconds since the clip / effect started
     play_id: int = 0                  # changes with every playback (effects use it to grab their first frame)
+    meta: dict | None = None          # what started the edit: {"moment": t, "event": name or None}
 
 
 class EditPlayer:
@@ -41,15 +42,17 @@ class EditPlayer:
         self._impact_t: float | None = None
         self._impact_done = False
         self._play_id = 0
+        self.meta: dict | None = None
 
     @property
     def busy(self) -> bool:
         return self.state != IDLE
 
-    def start(self, edit: Edit, now: float) -> bool:
+    def start(self, edit: Edit, now: float, meta: dict | None = None) -> bool:
         if self.busy or now < self._cooldown_until:
             return False
         self.edit, self.state, self._t_state = edit, PRE, now
+        self.meta = meta or {"moment": now, "event": None}
         self.audio.play(self.cfg.pre_edit_sound)
         return True
 
@@ -114,4 +117,4 @@ class EditPlayer:
             return View(PRE, self.edit, progress=min(1.0, (now - self._t_state) / max(self.cfg.pre_edit_duration, 1e-6)))
         t = now - self._t_state if self.state == PLAY else (self.edit.end or 0.0) - self.edit.start
         return View(self.state, self.edit, frame=self._last_frame, impact=impact, impacted=self._impact_done,
-                    t=t, play_id=self._play_id)
+                    t=t, play_id=self._play_id, meta=self.meta)
