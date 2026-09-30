@@ -1,6 +1,6 @@
-"""Generate demo edits (videos/) and sounds (sounds/) so the app runs out of the box.
+"""Generate the default sounds (sounds/) so the app runs out of the box; demo_clips() makes test videos.
 
-Replace them with your own clips: put video files in videos/, sounds in sounds/, and point config.json at them.
+Replace them with your own: put sounds in sounds/, video clips in videos/, and point config.json at them.
 """
 from __future__ import annotations
 
@@ -55,13 +55,16 @@ def make_clip(path: Path, title: str, hue: int, size=(480, 360), seconds=4.0, im
 
 
 def main() -> None:
-    (ROOT / "videos").mkdir(exist_ok=True)
     make_sounds(ROOT / "sounds")
-    for name, title, hue in (("demo_1", "EDIT 1", 10), ("demo_2", "EDIT 2", 60), ("demo_3", "EDIT 3", 110), ("demo_4", "EDIT 4", 150)):
-        if not (ROOT / "videos" / f"{name}.mp4").exists():
-            make_clip(ROOT / "videos" / f"{name}.mp4", title, hue, size=(640, 480) if name == "demo_3" else (480, 360))
-    cfg = ROOT / "config.json"
-    print(f"Demo videos in {ROOT / 'videos'}, sounds in {ROOT / 'sounds'}; config: {cfg}")
+    print(f"Sounds in {ROOT / 'sounds'}")
+
+
+def demo_clips() -> None:
+    """Coloured test clips in videos/ (for trying "file" edits without having any real clips)."""
+    (ROOT / "videos").mkdir(exist_ok=True)
+    for name, title, hue in (("demo_1", "EDIT 1", 10), ("demo_2", "EDIT 2", 60)):
+        make_clip(ROOT / "videos" / f"{name}.mp4", title, hue)
+    print(f"Demo clips in {ROOT / 'videos'}")
 
 
 if __name__ == "__main__":

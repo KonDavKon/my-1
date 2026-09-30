@@ -8,6 +8,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config as C  # noqa: E402
+import effects as E  # noqa: E402
 import make_demo_assets as demo  # noqa: E402
 import player as P  # noqa: E402
 import triggers as T  # noqa: E402
@@ -134,6 +135,68 @@ def test_hands_on_head_and_mouth():
     open_hand = _hand({"index", "middle", "ring", "pinky"}, thumb=True) + (0, -70)
     assert T.CONDITIONS["hand_mouth"](T.Ctx(hands=[open_hand], face=face))
     assert not T.CONDITIONS["hand_mouth"](T.Ctx(hands=[_hand(set()) + (0, -70)], face=face))   # a fist is not a mouth cover
+
+
+def _cam(seed):
+    rng = np.random.default_rng(seed)
+    img = rng.integers(0, 255, (480, 640, 3), dtype=np.uint8)
+    img[:, :, 2] = 230                        # a strongly red picture, so "grey" is measurable
+    return img
+
+
+def test_every_effect_renders():
+    cam, first = _cam(1), _cam(2)
+    for name in E.EFFECTS:
+        for t in (0.0, 0.5, 1.2, 2.0, 2.9):
+            out = E.render(name, cam, first, t, 1.2, 3.0, (320, 240), "")
+            assert out.shape == cam.shape and out.dtype == np.uint8, name
+        E.render(name, cam, first, 1.0, 1.2, 3.0, None, "X")        # no face known
+
+
+def test_effect_details():
+    cam, first = _cam(1), _cam(2)
+    # wasted fades to grey before the impact
+    before, done = E.render("wasted", cam, first, 0.1, 1.5, 3.5, None, ""), E.render("wasted", cam, first, 1.4, 1.5, 3.5, None, "")
+    spread = lambda im: float(np.abs(im[:, :, 2].astype(int) - im[:, :, 0].astype(int)).mean())   # noqa: E731
+    assert spread(done) < 0.2 * spread(before)
+    # finished is a freeze frame: the live camera does not matter
+    a = E.render("finished", cam, first, 0.5, 1.0, 3.0, None, "")
+    b = E.render("finished", _cam(3), first, 0.5, 1.0, 3.0, None, "")
+    assert (a == b).all()
+    # captions only appear from the impact on, and the default caption is used when empty
+    assert (E.render("zoom", cam, first, 0.9, 1.0, 3.0, None, "") != E.render("zoom", cam, first, 0.9, 1.0, 3.0, None, "A")).sum() == 0
+    assert E.DEFAULT_CAPTION["wasted"] == "WASTED"
+
+
+def test_effect_edits_in_config_and_player():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        raw = {"edits": [{"effect": "wasted", "trigger": "fist", "sound": "boom.wav"}], "impact_sound": "hit.wav"}
+        (tmp / "c.json").write_text(json.dumps(raw))
+        cfg = C.load(tmp / "c.json")
+        e = cfg.edits[0]
+        assert (e.file, e.effect, e.start, e.end, e.trigger_time, e.name) == (None, "wasted", 0.0, 3.0, 1.2, "wasted")
+        assert e.sound == tmp.resolve() / "boom.wav"
+        for bad in ({"effect": "nope"}, {"effect": "wasted", "file": "a.mp4"}, {"trigger": "fist"}):
+            (tmp / "b.json").write_text(json.dumps({"edits": [bad]}))
+            try:
+                C.load(tmp / "b.json")
+            except ValueError:
+                continue
+            raise AssertionError(f"accepted {bad}")
+        audio = FakeAudio()
+        pl = P.EditPlayer(cfg, audio)
+        pl.start(e, 0.0)
+        v = pl.update(1.0)                                            # pre over -> effect plays, its own sound
+        assert v.state == P.PLAY and v.frame is None and v.t == 0.0 and audio.played[-1] == "boom.wav"
+        first_id = v.play_id
+        v = pl.update(2.3)
+        assert abs(v.t - 1.3) < 1e-9 and v.impacted and "hit.wav" in audio.played
+        assert pl.update(4.0).state == P.POST                        # 3.0 s effect is over
+        assert pl.update(5.0).state == P.IDLE
+        pl._cooldown_until = 0
+        assert pl.start(e, 5.0)
+        assert pl.update(6.0).play_id != first_id                    # a new playback gets a new id
 
 
 if __name__ == "__main__":

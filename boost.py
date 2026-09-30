@@ -24,6 +24,7 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 
 import config as cfgmod
+import effects
 import hud
 import triggers
 from audio import Audio
@@ -40,25 +41,43 @@ DET_SIZE = (640, 480)     # detection resolution
 OUT_SIZE = (960, 720)     # what is shown / recorded
 
 
+READ_TIMEOUT = 20   # seconds without data before reconnecting
+ATTEMPTS = 6
+
+
 def ensure_model(name: str) -> str:
+    """Download a model once. A stalled connection is reopened and resumed from where it stopped (HTTP Range)."""
     path = MODELS_DIR / name
     if path.exists():
         return str(path)
     MODELS_DIR.mkdir(exist_ok=True)
     url = MODEL_URLS[name]
     tmp = path.with_name(path.name + ".part")   # a half-downloaded file must never look like a finished model
-    try:
-        with urllib.request.urlopen(url, timeout=30) as resp, open(tmp, "wb") as out:
-            total, done = int(resp.headers.get("Content-Length") or 0), 0
-            while chunk := resp.read(1 << 16):
-                out.write(chunk)
-                done += len(chunk)
-                print(f"\rDownloading {name}: {done / 1e6:.1f}" + (f"/{total / 1e6:.1f}" if total else "") + " MB", end="", flush=True)
-        print()
-        tmp.replace(path)
-    except (OSError, urllib.error.URLError) as exc:
-        tmp.unlink(missing_ok=True)
-        sys.exit(f"\nCould not download {name} ({exc}).\nDownload it manually from\n  {url}\nand save it as\n  {path}")
+    tmp.unlink(missing_ok=True)
+    done, total, error = 0, 0, None
+    for attempt in range(ATTEMPTS):
+        req = urllib.request.Request(url, headers={"Range": f"bytes={done}-"} if done else {})
+        try:
+            with urllib.request.urlopen(req, timeout=READ_TIMEOUT) as resp:
+                if done and resp.status != 206:      # server ignored Range: start over
+                    done = 0
+                length = int(resp.headers.get("Content-Length") or 0)
+                total = done + length if length else total
+                with open(tmp, "ab" if done else "wb") as out:
+                    while chunk := resp.read(1 << 16):
+                        out.write(chunk)
+                        done += len(chunk)
+                        print(f"\rDownloading {name}: {done / 1e6:.2f}" + (f"/{total / 1e6:.2f}" if total else "") + " MB",
+                              end="", flush=True)
+            if not total or done >= total:
+                print()
+                tmp.replace(path)
+                return str(path)
+        except (OSError, urllib.error.URLError) as exc:
+            error = exc
+        print(f"\nConnection stalled, resuming ({attempt + 1}/{ATTEMPTS - 1})...", flush=True)
+    tmp.unlink(missing_ok=True)
+    sys.exit(f"\nCould not download {name} ({error}).\nDownload it manually from\n  {url}\nand save it as\n  {path}")
     return str(path)
 
 
@@ -98,7 +117,7 @@ def main() -> None:
     if sys.stdout is None or sys.stderr is None:   # started with pythonw (desktop shortcut): keep a log instead
         sys.stdout = sys.stderr = open(ROOT / "boost.log", "w", encoding="utf-8", buffering=1)
     args = parse_args()
-    if not Path(args.config).exists() or not (ROOT / "videos").exists():
+    if not (ROOT / "sounds").exists():
         import make_demo_assets
         make_demo_assets.main()
     cfg = cfgmod.load(args.config)
@@ -106,7 +125,8 @@ def main() -> None:
     audio = Audio(enabled=not args.mute)
     if audio.ok:
         for e in cfg.edits:                          # cut the sound out of every clip now, not while playing
-            audio.clip_audio(e.file, e.start, e.end)
+            if e.file is not None and e.sound is None:
+                audio.clip_audio(e.file, e.start, e.end)
     player = EditPlayer(cfg, audio)
 
     cap, is_file = open_source(args.source)
@@ -126,6 +146,8 @@ def main() -> None:
         output_facial_transformation_matrixes=True, output_face_blendshapes=True)
 
     box = None
+    face_centre = None                                  # last known face centre, in detection pixels
+    fx_id, fx_first, fx_last = -1, None, None           # live effect: playback id, first frame, last picture
     frame_idx, last_ts, failed = 0, -1, 0
     t0 = time.monotonic()
     next_auto, auto_i = (args.auto or 0.0), 0
@@ -180,6 +202,7 @@ def main() -> None:
             img = cv2.resize(det, OUT_SIZE)
             sx = OUT_SIZE[0] / DET_SIZE[0]
             if ctx.face is not None:
+                face_centre = tuple(ctx.face.mean(axis=0))
                 tgt = np.array([*ctx.face.min(axis=0), *ctx.face.max(axis=0)]) * sx
                 pad = (tgt[2] - tgt[0]) * 0.12
                 tgt += np.array([-pad, -pad * 1.5, pad, pad * 0.6])
@@ -193,6 +216,14 @@ def main() -> None:
                 hud.panel_idle(img, rect, now)
             elif view.state == PRE:
                 hud.panel_pre(img, rect, view.progress, now)
+            elif view.edit.effect:
+                if view.state == PLAY:
+                    if view.play_id != fx_id:              # freeze frames start from this picture
+                        fx_id, fx_first = view.play_id, det.copy()
+                    e = view.edit
+                    fx_last = effects.render(e.effect, det, fx_first, view.t, e.trigger_time - e.start,
+                                             (e.end or e.start) - e.start, face_centre, e.caption)
+                hud.panel_clip(img, rect, fx_last)
             else:
                 hud.panel_clip(img, rect, view.frame)
                 if view.impacted:
