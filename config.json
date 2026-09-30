@@ -1,0 +1,17 @@
+{
+  "edits": [
+    {"name": "smile", "file": "videos/demo_1.mp4", "start": "00:00.000", "end": "00:04.000", "trigger_time": "00:02.000",
+     "trigger": "smile", "caption": "AURA +1000", "size": "panel"},
+    {"name": "fist", "file": "videos/demo_2.mp4", "start": "00:00.400", "end": "00:04.000", "trigger_time": "00:02.000",
+     "trigger": "fist", "caption": "LOCKED IN", "size": "panel"},
+    {"name": "mouth open", "file": "videos/demo_3.mp4", "start": "00:00.000", "end": "00:04.000", "trigger_time": "00:02.000",
+     "trigger": "mouth_open", "caption": "WOW", "size": "large"},
+    {"name": "thumbs up", "file": "videos/demo_4.mp4", "start": "00:00.000", "end": "00:04.000", "trigger_time": "00:02.000",
+     "trigger": ["thumbs_up", "peace"], "caption": "NICE", "size": "panel"}
+  ],
+  "pre_edit_sound": "sounds/pre_edit.wav",
+  "post_edit_sound": "sounds/post_edit.wav",
+  "impact_sound": "sounds/impact.wav",
+  "pre_edit_duration": 1.0,
+  "cooldown": 6
+}

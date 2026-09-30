@@ -1,0 +1,4 @@
+mediapipe>=0.10.14  # also installs opencv-contrib-python, do not add opencv-python next to it
+numpy
+pygame>=2.5
+imageio-ffmpeg
