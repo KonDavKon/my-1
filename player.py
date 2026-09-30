@@ -26,6 +26,8 @@ class View:
     progress: float = 0.0             # 0..1 through the "incoming" phase
     impact: float = 0.0               # 1 -> 0 right after trigger_time (drives flash / shake / caption pop)
     impacted: bool = False            # trigger_time has been reached (the caption shows from then on)
+    t: float = 0.0                    # seconds since the clip / effect started
+    play_id: int = 0                  # changes with every playback (effects use it to grab their first frame)
 
 
 class EditPlayer:
@@ -38,6 +40,7 @@ class EditPlayer:
         self._fps, self._frame_idx, self._last_frame = 30.0, 0, None
         self._impact_t: float | None = None
         self._impact_done = False
+        self._play_id = 0
 
     @property
     def busy(self) -> bool:
@@ -52,15 +55,20 @@ class EditPlayer:
 
     def _begin_play(self, now: float) -> None:
         e = self.edit
-        self._cap = cv2.VideoCapture(str(e.file))
-        self._fps = self._cap.get(cv2.CAP_PROP_FPS) or 30.0
-        if e.start > 0:
-            self._cap.set(cv2.CAP_PROP_POS_MSEC, e.start * 1000)
-        self._frame_idx, self._last_frame = int(e.start * self._fps), None
+        self._last_frame = None
+        if e.file is not None:
+            self._cap = cv2.VideoCapture(str(e.file))
+            self._fps = self._cap.get(cv2.CAP_PROP_FPS) or 30.0
+            if e.start > 0:
+                self._cap.set(cv2.CAP_PROP_POS_MSEC, e.start * 1000)
+            self._frame_idx = int(e.start * self._fps)
         self._impact_t, self._impact_done = None, False
+        self._play_id += 1
         self.state, self._t_state = PLAY, now
-        clip_sound = self.audio.clip_audio(e.file, e.start, e.end)
-        self.audio.play(clip_sound)
+        if e.sound is not None:
+            self.audio.play(e.sound)
+        elif e.file is not None:
+            self.audio.play(self.audio.clip_audio(e.file, e.start, e.end))
 
     def _finish_play(self, now: float) -> None:
         if self._cap is not None:
@@ -81,7 +89,7 @@ class EditPlayer:
             end = e.end
             if end is not None and clip_time >= end:
                 self._finish_play(now)
-            else:
+            elif self._cap is not None:
                 wanted = int(clip_time * self._fps)
                 while self._frame_idx <= wanted:
                     ok, frame = self._cap.read()
@@ -104,4 +112,6 @@ class EditPlayer:
             return View(IDLE)
         if self.state == PRE:
             return View(PRE, self.edit, progress=min(1.0, (now - self._t_state) / max(self.cfg.pre_edit_duration, 1e-6)))
-        return View(self.state, self.edit, frame=self._last_frame, impact=impact, impacted=self._impact_done)
+        t = now - self._t_state if self.state == PLAY else (self.edit.end or 0.0) - self.edit.start
+        return View(self.state, self.edit, frame=self._last_frame, impact=impact, impacted=self._impact_done,
+                    t=t, play_id=self._play_id)
